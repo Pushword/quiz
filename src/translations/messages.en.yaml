@@ -1,4 +1,12 @@
 quiz:
+  label:
+    better: 'Better than {p}% of participants'
+    explanation: 'Explanation'
+    level: 'Level'
+    nextLevel: 'Next level'
+    question: 'Question'
+    questions: 'questions'
+    score: 'Your score:'
   result:
     label:
       plural: 'Quiz results'

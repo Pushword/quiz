@@ -4,7 +4,6 @@ namespace Pushword\Quiz\Twig;
 
 use Pushword\Conversation\Twig\AppExtension;
 use Pushword\Core\Site\SiteRegistry;
-use Pushword\Quiz\Model\ResultBand;
 use Pushword\Quiz\Service\QuizFactory;
 
 use function Safe\json_decode;
@@ -24,15 +23,6 @@ use Twig\Environment as Twig;
  */
 final class QuizExtension
 {
-    /** English fallbacks for the author-defined UI words (see Quiz::$labels). */
-    private const array DEFAULT_LABELS = [
-        'question' => 'Question',
-        'questions' => 'questions',
-        'explanation' => 'Explanation',
-        'score' => 'Your score:',
-        'better' => 'Better than {p}% of participants',
-    ];
-
     private int $instances = 0;
 
     public function __construct(
@@ -72,27 +62,16 @@ final class QuizExtension
             return $this->renderError($messages);
         }
 
-        $results = array_map(
-            static fn (ResultBand $band): array => ['min' => $band->min, 'msg' => $band->msg],
-            $quiz->results,
-        );
-
-        // UI words live in the quiz JSON (author-defined, no i18n); fall back to
-        // English defaults so a quiz that sets none still reads correctly.
-        $labels = [...self::DEFAULT_LABELS, ...$quiz->labels];
-
         $template = $this->apps->get()->getView('/component/quiz.html.twig', '@PushwordQuiz');
 
+        // UI words default to the site locale (resolved with |trans in the
+        // template); a quiz can override any of them through its JSON `labels`.
+        // The template builds the per-unit JS config itself, so it handles both
+        // a single quiz and the per-level tabs uniformly.
         return $this->twig->render($template, [
             'quiz' => $quiz,
             'page' => $this->apps->getCurrentPage(),
             'id' => 'pw-quiz-'.(++$this->instances),
-            'labels' => $labels,
-            'config' => [
-                'feedback' => $quiz->feedback,
-                'results' => $results,
-                'labels' => ['score' => $labels['score'], 'better' => $labels['better']],
-            ],
             'conversationAvailable' => class_exists(AppExtension::class),
         ]);
     }
