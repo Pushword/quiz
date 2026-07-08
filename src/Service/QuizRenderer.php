@@ -2,7 +2,10 @@
 
 namespace Pushword\Quiz\Service;
 
+use Psr\Log\LoggerInterface;
 use Pushword\Conversation\Twig\AppExtension;
+use Pushword\Core\Service\EditorNotice\TwigErrorMarker;
+use Pushword\Core\Service\Markdown\BrokenImageComment;
 use Pushword\Core\Site\SiteRegistry;
 use Pushword\Core\Twig\MediaExtension;
 use Pushword\Core\Twig\VideoExtension;
@@ -12,7 +15,7 @@ use Pushword\Quiz\Model\Question;
 
 use function Safe\json_decode;
 
-use Symfony\Bundle\SecurityBundle\Security;
+use Symfony\Component\Routing\RouterInterface;
 use Symfony\Component\Validator\Validator\ValidatorInterface;
 use Symfony\Contracts\Translation\TranslatorInterface;
 use Throwable;
@@ -24,10 +27,11 @@ use Twig\Extension\RuntimeExtensionInterface;
  * function and the `{% quiz %}…{% endquiz %}` tag — registered as a Twig runtime
  * so the tag's compiled node can call it back.
  *
- * Tolerant by design on two axes: a malformed payload degrades gracefully
- * (admins see a detailed error panel, visitors see nothing) instead of 500-ing
- * the page, and a missing/broken illustration is skipped rather than fataling
- * the whole render.
+ * Tolerant by design on two axes, both via the shared editor-notice markers: a
+ * malformed payload degrades to an invisible TwigErrorMarker (never a 500), and a
+ * missing/broken illustration to a BrokenImageComment. Visitors see nothing;
+ * EditorNoticeListener turns both into visible badges for ROLE_EDITOR and the page
+ * scanner reports them — so the render output stays role-independent (cacheable).
  */
 final class QuizRenderer implements RuntimeExtensionInterface
 {
@@ -39,9 +43,10 @@ final class QuizRenderer implements RuntimeExtensionInterface
         private readonly QuizFactory $factory,
         private readonly ValidatorInterface $validator,
         private readonly TranslatorInterface $translator,
-        private readonly Security $security,
         private readonly MediaExtension $mediaExtension,
         private readonly VideoExtension $videoExtension,
+        private readonly RouterInterface $router,
+        private readonly LoggerInterface $logger,
     ) {
     }
 
@@ -79,11 +84,32 @@ final class QuizRenderer implements RuntimeExtensionInterface
                 'page' => $this->apps->getCurrentPage(),
                 'id' => 'pw-quiz-'.(++$this->instances),
                 'conversationAvailable' => class_exists(AppExtension::class),
+                'resultEndpoint' => $this->resolveResultEndpoint(),
             ]);
         } catch (Throwable $throwable) {
             // Last-resort guard: a broken template must never 500 the page.
             // Per-illustration failures are already swallowed in renderFigure().
             return $this->renderError(['Rendering failed: '.$throwable->getMessage()]);
+        }
+    }
+
+    /**
+     * Absolute (live-host) endpoint the runtime posts attempts to, generated here
+     * rather than in the template so a failure can be contained: recording results
+     * is an optional enhancement, and an unregistered `pushword_quiz_result` route
+     * must not blank out the whole quiz (SEO/no-JS Q&A included). On failure it
+     * logs a clear warning and returns '' — the runtime then falls back to the
+     * relative path, and percentile/share simply stay off.
+     */
+    private function resolveResultEndpoint(): string
+    {
+        try {
+            return $this->apps->get()->getStr('base_live_url')
+                .$this->router->generate('pushword_quiz_result');
+        } catch (Throwable $throwable) {
+            $this->logger->warning('Quiz result endpoint unavailable, percentile/share disabled: '.$throwable->getMessage());
+
+            return '';
         }
     }
 
@@ -108,8 +134,8 @@ final class QuizRenderer implements RuntimeExtensionInterface
             } else {
                 return '';
             }
-        } catch (Throwable $throwable) {
-            return $this->mediaWarning($throwable);
+        } catch (Throwable) {
+            return BrokenImageComment::for((string) ($question->media ?? $question->video));
         }
 
         return '<div class="pw-quiz-media">'.$media.'</div>';
@@ -126,8 +152,8 @@ final class QuizRenderer implements RuntimeExtensionInterface
 
         try {
             return $this->mediaExtension->renderImage($answer->media, alt: $answer->alt ?? '', class: 'pw-quiz-a-img', lazy: true);
-        } catch (Throwable $throwable) {
-            return $this->mediaWarning($throwable);
+        } catch (Throwable) {
+            return BrokenImageComment::for($answer->media);
         }
     }
 
@@ -148,47 +174,20 @@ final class QuizRenderer implements RuntimeExtensionInterface
                 mode: 'responsive',
                 lazy: true,
             );
-        } catch (Throwable $throwable) {
-            return $this->mediaWarning($throwable);
+        } catch (Throwable) {
+            return BrokenImageComment::for($profile->media);
         }
-    }
-
-    private function mediaWarning(Throwable $throwable): string
-    {
-        if (! $this->isAdmin()) {
-            return '';
-        }
-
-        return '<span class="pw-quiz-media-error" role="alert" style="display:block;color:#9f1239;font-size:.85rem">⚠ '
-            .htmlspecialchars($throwable->getMessage()).'</span>';
     }
 
     /**
+     * An invalid payload degrades to an invisible marker (never a 500, never
+     * visible content): EditorNoticeListener turns it into a badge for ROLE_EDITOR
+     * and the page scanner reports it.
+     *
      * @param string[] $messages
      */
     private function renderError(array $messages): string
     {
-        if (! $this->isAdmin()) {
-            return '';
-        }
-
-        $items = implode('', array_map(
-            static fn (string $message): string => '<li>'.htmlspecialchars($message).'</li>',
-            $messages,
-        ));
-
-        return '<div class="pw-quiz-error" role="alert" style="border:2px solid #e11d48;background:#fff1f2;'
-            .'color:#9f1239;padding:1rem;border-radius:.5rem;margin:1rem 0">'
-            .'<strong>⚠ Invalid quiz</strong>'
-            .'<ul style="margin:.5rem 0 0;padding-left:1.25rem">'.$items.'</ul></div>';
-    }
-
-    private function isAdmin(): bool
-    {
-        try {
-            return $this->security->isGranted('ROLE_ADMIN');
-        } catch (Throwable) {
-            return false;
-        }
+        return TwigErrorMarker::for('Quiz: '.implode(' · ', $messages));
     }
 }
