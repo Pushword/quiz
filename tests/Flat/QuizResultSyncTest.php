@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 namespace Pushword\Quiz\Tests\Flat;
 
 use Doctrine\ORM\EntityManagerInterface;
@@ -12,6 +14,7 @@ use Pushword\Quiz\Repository\QuizResultRepository;
 use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
 
 #[Group('integration')]
+#[Group('serial')]
 final class QuizResultSyncTest extends KernelTestCase
 {
     private EntityManagerInterface $entityManager;
