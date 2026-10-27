@@ -5,6 +5,7 @@ quiz:
     confirm: 'Confirm answer'
     editAnswers: 'Change my answers'
     explanation: 'Explanation'
+    finish: 'See my result'
     level: 'Level'
     nextLevel: 'Next level'
     profile: 'Your profile:'
@@ -13,6 +14,7 @@ quiz:
     restart: 'Restart the quiz'
     score: 'Your score:'
     share: '{p}% got the same profile'
+    shareResult: '{p}% got the same result'
   result:
     label:
       plural: 'Quiz results'
@@ -21,5 +23,5 @@ quiz:
       createdAt: 'Date'
       host: 'Host'
       quiz: 'Quiz'
-      result: 'Profile'
+      result: 'Profile or value'
       score: 'Score (%)'

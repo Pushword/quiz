@@ -26,6 +26,7 @@ use Symfony\Component\Routing\RouterInterface;
 use Symfony\Component\Validator\Validator\ValidatorInterface;
 use Symfony\Contracts\Translation\TranslatorInterface;
 use Twig\Environment;
+use Twig\Loader\FilesystemLoader;
 
 #[Group('integration')]
 final class QuizValidationTest extends KernelTestCase
@@ -70,6 +71,119 @@ final class QuizValidationTest extends KernelTestCase
         self::assertStringContainsString('Choose comfortably.', $output);
         self::assertStringNotContainsString('acceptedAnswer', $output);
         self::assertStringContainsString('"recordResults":false', $output);
+    }
+
+    public function testOnlyARecordedQuizCarriesAResultSignature(): void
+    {
+        self::bootKernel();
+        self::getContainer()->get(RequestContext::class)->setRequestContext('localhost.dev');
+        $extension = self::getContainer()->get(QuizExtension::class);
+        $signed = '/"resultSignature":"[0-9a-f]{64}"/';
+
+        $assessment = ['mode' => 'assessment', 'questions' => [['q' => 'Q', 'answers' => [['a' => 'A', 'value' => 0], ['a' => 'B', 'value' => 1]]]]];
+        $output = $extension->renderQuiz(json_encode($assessment, \JSON_THROW_ON_ERROR));
+        self::assertStringContainsString('"resultSignature":""', $output);
+        self::assertDoesNotMatchRegularExpression($signed, $output);
+
+        $assessment['recordResults'] = true;
+        self::assertMatchesRegularExpression($signed, $extension->renderQuiz(json_encode($assessment, \JSON_THROW_ON_ERROR)));
+
+        $levels = ['recordResults' => false, 'levels' => [$this->validQuiz() + ['difficulty' => 'Easy'], $this->validQuiz() + ['difficulty' => 'Hard']]];
+        $output = $extension->renderQuiz(json_encode($levels, \JSON_THROW_ON_ERROR));
+        self::assertSame(2, substr_count($output, '"resultSignature":""'));
+        self::assertDoesNotMatchRegularExpression($signed, $output);
+    }
+
+    public function testAssessmentComparisonLineSpeaksOfAResultNotAProfile(): void
+    {
+        self::bootKernel();
+        self::getContainer()->get(RequestContext::class)->setRequestContext('localhost.dev');
+        self::getContainer()->get(TranslatorInterface::class)->setLocale('en');
+        $extension = self::getContainer()->get(QuizExtension::class);
+        $assessment = ['mode' => 'assessment', 'questions' => [['q' => 'Q', 'answers' => [['a' => 'A', 'value' => 0], ['a' => 'B', 'value' => 1]]]]];
+        $profile = [
+            'mode' => 'profile',
+            'profiles' => [['key' => 'explorer', 'title' => 'Explorer']],
+            'questions' => [['q' => 'Q', 'answers' => [['a' => 'A', 'weights' => ['explorer' => 1]], ['a' => 'B']]]],
+        ];
+
+        self::assertStringContainsString('"share":"{p}% got the same result"', $extension->renderQuiz(json_encode($assessment, \JSON_THROW_ON_ERROR)));
+        self::assertStringContainsString('"share":"{p}% got the same profile"', $extension->renderQuiz(json_encode($profile, \JSON_THROW_ON_ERROR)));
+
+        $assessment['labels'] = ['share' => '{p}% share your level'];
+        self::assertStringContainsString('"share":"{p}% share your level"', $extension->renderQuiz(json_encode($assessment, \JSON_THROW_ON_ERROR)));
+    }
+
+    public function testAssessmentLastStepLabelIsLocalizedAndOverridable(): void
+    {
+        self::bootKernel();
+        self::getContainer()->get(RequestContext::class)->setRequestContext('localhost.dev');
+        self::getContainer()->get(TranslatorInterface::class)->setLocale('en');
+        $extension = self::getContainer()->get(QuizExtension::class);
+        $data = ['mode' => 'assessment', 'questions' => [['q' => 'Q', 'answers' => [['a' => 'A', 'value' => 0], ['a' => 'B', 'value' => 1]]]]];
+
+        self::assertStringContainsString('"finish":"See my result"', $extension->renderQuiz(json_encode($data, \JSON_THROW_ON_ERROR)));
+
+        $data['labels'] = ['finish' => 'Show my level'];
+        self::assertStringContainsString('"finish":"Show my level"', $extension->renderQuiz(json_encode($data, \JSON_THROW_ON_ERROR)));
+    }
+
+    public function testLastStepLabelFollowsTheLocaleAndEachLevelOverride(): void
+    {
+        self::bootKernel();
+        self::getContainer()->get(RequestContext::class)->setRequestContext('localhost.dev');
+        self::getContainer()->get(TranslatorInterface::class)->setLocale('fr');
+        $level = static fn (string $difficulty, array $labels): array => [
+            'difficulty' => $difficulty,
+            'labels' => $labels,
+            'questions' => [['q' => 'Q', 'answers' => [['a' => 'A', 'correct' => true], ['a' => 'B']]]],
+        ];
+        $output = self::getContainer()->get(QuizExtension::class)->renderQuiz(json_encode(
+            ['levels' => [$level('Easy', []), $level('Hard', ['finish' => 'Terminer'])]],
+            \JSON_THROW_ON_ERROR,
+        ));
+
+        self::assertSame(1, substr_count($output, '"finish":"Voir mon r\u00e9sultat"'));
+        self::assertSame(1, substr_count($output, '"finish":"Terminer"'));
+    }
+
+    public function testASiteOverrideFillsTheResultExtensionBlock(): void
+    {
+        self::bootKernel();
+        self::getContainer()->get(RequestContext::class)->setRequestContext('localhost.dev');
+        $loader = self::getContainer()->get(Environment::class)->getLoader();
+        self::assertInstanceOf(FilesystemLoader::class, $loader);
+        // Where a site's templates/bundles/PushwordQuizBundle/ would sit: ahead of the bundle.
+        $loader->prependPath(__DIR__.'/Fixtures/templates', 'PushwordQuiz');
+
+        $output = self::getContainer()->get(QuizExtension::class)->renderQuiz(json_encode([
+            'mode' => 'assessment',
+            'questions' => [['q' => 'Q', 'answers' => [['a' => 'A', 'value' => 0], ['a' => 'B', 'value' => 1]]]],
+        ], \JSON_THROW_ON_ERROR));
+
+        self::assertMatchesRegularExpression(
+            '#<div class="pw-quiz-result [^"]*" hidden>\s*<div class="pw-quiz-score" aria-live="polite"></div>\s*'
+            .'<div class="site-recommendations" data-quiz="[^"]*" data-mode="assessment"></div>#',
+            $output,
+        );
+    }
+
+    public function testScoreBandOutsideZeroToHundredIsRejected(): void
+    {
+        self::bootKernel();
+        $data = $this->validQuiz();
+        $data['results'] = [['min' => 101, 'msg' => 'Too high'], ['min' => -1, 'msg' => 'Too low'], ['min' => 50, 'msg' => 'Fine']];
+        $levels = ['levels' => [$data + ['difficulty' => 'Easy']]];
+
+        foreach ([[$data, 'results'], [$levels, 'levels[0].results']] as [$quizData, $path]) {
+            $paths = [];
+            $quiz = self::getContainer()->get(QuizFactory::class)->fromArray($quizData);
+            foreach (self::getContainer()->get(ValidatorInterface::class)->validate($quiz) as $violation) {
+                $paths[] = $violation->getPropertyPath();
+            }
+
+            self::assertSame([$path.'[0].min', $path.'[1].min'], $paths);
+        }
     }
 
     public function testAssessmentRejectsANonFiniteResultThreshold(): void
@@ -261,6 +375,57 @@ final class QuizValidationTest extends KernelTestCase
         self::assertStringContainsString('class="pw-quiz-q question-card-of-my-own"', $output);
         self::assertStringContainsString('quiz-root-of-my-own', $output);
         self::assertStringNotContainsString('rounded-xl border border-gray-200 bg-white p-5', $output);
+    }
+
+    public function testTheTopicLabelAndHintCarryDefaultUtilities(): void
+    {
+        self::bootKernel();
+        self::getContainer()->get(RequestContext::class)->setRequestContext('localhost.dev');
+
+        $output = self::getContainer()->get(QuizExtension::class)->renderQuiz($this->labelledQuizJson());
+
+        self::assertStringContainsString('class="pw-quiz-q-label font-semibold"', $output);
+        self::assertStringContainsString('class="pw-quiz-hint mb-4 text-gray-500"', $output);
+    }
+
+    public function testAClassGlobalOverridesTheTopicLabelAndHintUtilities(): void
+    {
+        self::bootKernel();
+        self::getContainer()->get(RequestContext::class)->setRequestContext('localhost.dev');
+        $twig = self::getContainer()->get(Environment::class);
+        $twig->addGlobal('pwQuizQLabelClass', 'label-of-my-own');
+        $twig->addGlobal('pwQuizHintClass', 'hint-of-my-own');
+
+        $output = self::getContainer()->get(QuizExtension::class)->renderQuiz($this->labelledQuizJson());
+
+        self::assertStringContainsString('class="pw-quiz-q-label label-of-my-own"', $output);
+        self::assertStringContainsString('class="pw-quiz-hint hint-of-my-own"', $output);
+        self::assertStringNotContainsString('mb-4 text-gray-500', $output);
+        self::assertStringNotContainsString('pw-quiz-q-label font-semibold', $output);
+    }
+
+    public function testFrenchAssessmentComparisonLineSpeaksOfAResult(): void
+    {
+        self::bootKernel();
+        self::getContainer()->get(RequestContext::class)->setRequestContext('localhost.dev');
+        self::getContainer()->get(TranslatorInterface::class)->setLocale('fr');
+        $assessment = ['mode' => 'assessment', 'questions' => [['q' => 'Q', 'answers' => [['a' => 'A', 'value' => 0], ['a' => 'B', 'value' => 1]]]]];
+
+        $output = self::getContainer()->get(QuizExtension::class)->renderQuiz(json_encode($assessment, \JSON_THROW_ON_ERROR));
+
+        self::assertStringContainsString('ont obtenu le m\\u00eame r\\u00e9sultat', $output);
+    }
+
+    private function labelledQuizJson(): string
+    {
+        return json_encode([
+            'questions' => [[
+                'q' => 'Capital of France?',
+                'label' => 'Topic',
+                'hint' => 'A hint',
+                'answers' => [['a' => 'Paris', 'correct' => true], ['a' => 'Lyon']],
+            ]],
+        ], \JSON_THROW_ON_ERROR);
     }
 
     /**
